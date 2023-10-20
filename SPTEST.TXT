@@ -1,0 +1,212 @@
+"2021-10-14-16.03.39.826001
+DROP PROCEDURE DYLT_MISSED_PICKUP_REPORT @
+CREATE PROCEDURE TMWIN.DYLT_MISSED_PICKUP_REPORT(        
+        IN iMONTH      VARCHAR(2),
+        IN iYEAR        VARCHAR(4),
+        IN iSERVICE_CENTER  VARCHAR(3)
+    )
+  LANGUAGE SQL 
+  DYNAMIC RESULT SETS 1
+  BEGIN
+    -- aggregate table is the detail
+    -- summary is the totaled display data
+    DELETE FROM DYLT_MISSED_PU_SUMMARY WHERE INSERT_DATE = CURRENT_DATE and PU_month = month(CURRENT_DATE) and pu_year = year(CURRENT_DATE);
+    call TMWIN.DYLT_MERGE_MISSED_PICKUP_AGG();
+    call TMWIN.DYLT_FILL_CURRENT_MONTH_MISSED_PU_SUMMARY();
+  
+    
+    BEGIN
+    DECLARE C1 CURSOR WITH RETURN TO CALLER
+	FOR
+
+        SELECT * FROM  DYLT_MISSED_PU_SUMMARY where INSERT_DATE = (SELECT max(INSERT_DATE) from DYLT_MISSED_PU_SUMMARY
+            where PU_MONTH = iMONTH
+            and PU_YEAR = iYEAR 
+            and PICKUP_TERMINAL = iSERVICE_CENTER )
+        and PU_MONTH = iMONTH and PU_YEAR = iYEAR and PICKUP_TERMINAL = iSERVICE_CENTER order by sort_order asc with ur;
+
+  OPEN C1;
+  END;
+  END @
+GRANT EXECUTE ON PROCEDURE DYLT_MISSED_PICKUP_REPORT TO PUBLIC @
+"
+"2021-11-24-14.47.30.892005
+DROP PROCEDURE DYLT_MERGE_MISSED_PICKUP_AGG @
+CREATE PROCEDURE DYLT_MERGE_MISSED_PICKUP_AGG()
+LANGUAGE SQL
+P1:BEGIN
+
+
+     delete from DYLT_MISSED_PICKUP_AGG where MONTH_OF_YEAR = right('0'||cast(month(CURRENT DATE) as varchar(2)),2) and THE_YEAR = cast(YEAR(CURRENT DATE)  as varchar(4)) and DAY_OF_MONTH >= right('0'||cast(DAY(CURRENT DATE) as varchar(2)),2);
+
+
+merge into TMWIN.DYLT_MISSED_PICKUP_AGG CURRENT_AGG 
+using(
+ 
+ 
+ SELECT
+           T.BILL_NUMBER as BILL_NUMBER,
+           T.ORIGIN as SHIPPER,
+           MAX(O.TRIP_NUMBER) as TRIP,
+           MAX(T.ROLLUP_WEIGHT) as TONNAGE,
+         
+            DAY( CASE WHEN O.STATUS_CODE in ('PICKD', 'PCONF', 'PFCL', 'ATMPTPICK', 'MISSEDPICK', 'CANCL') then CURRENT DATE WHEN T.PICK_UP_BY < CURRENT DATE THEN CURRENT DATE ELSE T.PICK_UP_BY END ) as DAY_OF_MONTH, 
+            MAX(SUBSTR(DAYNAME( CASE WHEN O.STATUS_CODE in ('PICKD', 'PCONF', 'PFCL', 'ATMPTPICK', 'MISSEDPICK', 'CANCL') then CURRENT DATE WHEN T.PICK_UP_BY < CURRENT DATE THEN CURRENT DATE ELSE T.PICK_UP_BY END ), 1, 3)) as DAY_OF_WEEK,
+            MAX(Month( CASE WHEN O.STATUS_CODE in ('PICKD', 'PCONF', 'PFCL', 'ATMPTPICK', 'MISSEDPICK', 'CANCL') then CURRENT DATE WHEN T.PICK_UP_BY < CURRENT DATE THEN CURRENT DATE ELSE T.PICK_UP_BY END )) as MONTH_OF_YEAR,
+            MAX(Year( CASE WHEN O.STATUS_CODE in ('PICKD', 'PCONF', 'PFCL', 'ATMPTPICK', 'MISSEDPICK', 'CANCL') then CURRENT DATE WHEN T.PICK_UP_BY < CURRENT DATE THEN CURRENT DATE ELSE T.PICK_UP_BY END )) as THE_YEAR,
+   
+   
+            MAX(T.PICKUP_TERMINAL) as PICKUP_TERMINAL, 
+            MIN(case 
+                when O.STATUS_CODE = 'CANCL' then 0
+                when O.STATUS_CODE in ('PICKD', 'PCONF','PFCL') then 1
+                when O.STATUS_CODE = 'ATMPTPICK' then 2
+                when O.STATUS_CODE = 'MISSEDPICK' then 3
+                when LEFT(T.BILL_NUMBER,1) = 'P' and T.PICK_UP_BY >= Current date - 0 days and T.PICK_UP_BY <= Current date + 1 days then 4
+                when O.STATUS_CODE = 'AVAIL' and T.PICK_UP_BY >= Current date - 0 days and T.PICK_UP_BY <= Current date + 1 days then 4   
+            end) PRIORITY,
+            MAX(O.UPDATED_BY) as UPDATED_BY
+            
+         FROM
+           TLORDER T 
+              LEFT JOIN 
+			(
+			select distinct Order_ID, STATUS_CODE, CHANGED, UPDATED_BY, TRIP_NUMBER from ODRSTAT 
+				where status_code in ('PICKD', 'PCONF', 'PFCL', 'ATMPTPICK', 'MISSEDPICK', 'CANCL','AVAIL') 
+					and CHANGED >= TMWIN.BEG_OF_DAY(CURRENT TIMESTAMP) + 5 HOURS
+					and ID = (select max(ID) from odrstat d where d.ORDER_ID = ODRSTAT.ORDER_ID and d.status_code in ('PICKD', 'PCONF', 'PFCL', 'ATMPTPICK', 'MISSEDPICK', 'CANCL','AVAIL') 
+							and CHANGED = (select max(changed) 
+							from odrstat d1 
+							join TLORDER T1 on T1.DETAIL_LINE_ID = d1.ORDER_ID
+							where d1.ORDER_ID = ODRSTAT.ORDER_ID 
+							and 
+
+
+
+								(
+									(
+										(d1.status_code in ('PICKD', 'PCONF', 'PFCL', 'ATMPTPICK', 'MISSEDPICK', 'CANCL') and T1.PICKUP_TERMINAL <> 'EWR'
+											and d1.CHANGED >= (SELECT (TMWIN.BEG_OF_DAY(CURRENT TIMESTAMP)) FROM DUAL) + 5 HOURS 
+										) 
+										or
+										(
+											d1.status_code in ('AVAIL') and T1.PICKUP_TERMINAL <> 'EWR' 
+											and d1.CHANGED >= (SELECT (TMWIN.BEG_OF_DAY(CURRENT TIMESTAMP)) FROM DUAL) + 5 HOURS 
+											and 
+											not exists(
+												select 1 from odrstat d2 where d2.order_ID = d1.order_ID and CHANGED >= (SELECT (TMWIN.BEG_OF_DAY(CURRENT TIMESTAMP)) FROM DUAL) + 5 HOURS 
+												and d2.status_code in ('PICKD', 'PCONF', 'PFCL', 'ATMPTPICK', 'MISSEDPICK', 'CANCL')
+											   	)
+										)
+									)
+								or
+
+									(
+										
+										(d1.status_code in ('PICKD', 'PCONF','ATMPTPICK', 'MISSEDPICK', 'CANCL') and T1.PICKUP_TERMINAL = 'EWR'
+											and d1.CHANGED >= (SELECT (TMWIN.BEG_OF_DAY(CURRENT TIMESTAMP)) FROM DUAL) + 5 HOURS 
+										)                    					
+										or
+										
+										(
+											(
+												d1.status_code in ('AVAIL') and T1.PICKUP_TERMINAL = 'EWR'
+												and d1.CHANGED >= (SELECT (TMWIN.BEG_OF_DAY(CURRENT TIMESTAMP)) FROM DUAL) + 5 HOURS 
+											)
+											and 
+										
+											not exists(
+												select 1 from odrstat d2 where d2.order_ID = d1.order_ID and d2.CHANGED >= (SELECT (TMWIN.BEG_OF_DAY(CURRENT TIMESTAMP)) FROM DUAL) + 5 HOURS 
+												and d2.status_code in ('PICKD', 'PCONF', 'PFCL', 'ATMPTPICK', 'MISSEDPICK', 'CANCL')
+										        	  )
+										)                  			
+									)
+								)	
+
+
+
+
+
+
+							)
+						  )
+					and ROW_TIMESTAMP >= (SELECT (TMWIN.BEG_OF_DAY(CURRENT TIMESTAMP)) FROM DUAL) + 5 HOURS
+			 ) O
+              ON T.DETAIL_LINE_ID = O.ORDER_ID 
+        
+        WHERE
+ 
+      
+           T.CURRENT_STATUS not in ('QUOTE', '','BILLD','CANCL')
+           and T.CURRENT_STATUS is not null
+           and T.BILL_NUMBER != '0'
+           and T.BILL_NUMBER != 'NA'
+           and T.BILL_NUMBER != 'REVIEW-OPS'
+           and T.DOCUMENT_TYPE = 'INVOICE'
+           AND T.BILL_NUMBER NOT LIKE '%Q%' 
+           AND T.BILL_NUMBER NOT LIKE '%D%'                  
+           AND (T.INTERFACE_STATUS_F IS  NULL  OR T.INTERFACE_STATUS_F<>-1)
+           
+           group by T.ORIGIN, 
+            DAY( CASE WHEN O.STATUS_CODE in ('PICKD', 'PCONF', 'PFCL', 'ATMPTPICK', 'MISSEDPICK', 'CANCL') then CURRENT DATE  WHEN T.PICK_UP_BY < CURRENT DATE THEN CURRENT DATE ELSE T.PICK_UP_BY END ), 
+            Month( CASE WHEN O.STATUS_CODE in ('PICKD', 'PCONF', 'PFCL', 'ATMPTPICK', 'MISSEDPICK', 'CANCL') then CURRENT DATE  WHEN T.PICK_UP_BY < CURRENT DATE THEN CURRENT DATE ELSE T.PICK_UP_BY END ), 
+            Year( CASE WHEN O.STATUS_CODE in ('PICKD', 'PCONF', 'PFCL', 'ATMPTPICK', 'MISSEDPICK', 'CANCL') then CURRENT DATE  WHEN T.PICK_UP_BY < CURRENT DATE THEN CURRENT DATE ELSE T.PICK_UP_BY END ), 
+            T.BILL_NUMBER
+            having count (T.BILL_NUMBER) = 1
+ 
+ 
+ 
+ 
+ ) NEW_AGG
+    ON  (CURRENT_AGG.BILL_NUMBER = NEW_AGG.BILL_NUMBER) AND 
+        (CURRENT_AGG.DAY_OF_MONTH = NEW_AGG.DAY_OF_MONTH) AND
+        (CURRENT_AGG.MONTH_OF_YEAR = NEW_AGG.MONTH_OF_YEAR) AND
+        (CURRENT_AGG.THE_YEAR = NEW_AGG.THE_YEAR) AND
+        (CURRENT_AGG.PICKUP_TERMINAL = NEW_AGG.PICKUP_TERMINAL) AND
+        (coalesce(CURRENT_AGG.SHIPPER, '') = coalesce(NEW_AGG.SHIPPER, ''))
+   WHEN MATCHED THEN
+     UPDATE SET
+        BILL_NUMBER = NEW_AGG.BILL_NUMBER,	
+        SHIPPER = NEW_AGG.SHIPPER,	
+        TRIP = NEW_AGG.TRIP,	
+        TONNAGE = NEW_AGG.TONNAGE,	
+        DAY_OF_MONTH = NEW_AGG.DAY_OF_MONTH,	
+        DAY_OF_WEEK = NEW_AGG.DAY_OF_WEEK,	
+        MONTH_OF_YEAR = NEW_AGG.MONTH_OF_YEAR,	
+        THE_YEAR = NEW_AGG.THE_YEAR,	
+        PICKUP_TERMINAL = NEW_AGG.PICKUP_TERMINAL,	
+        PRIORITY = NEW_AGG.PRIORITY,	
+        UPDATED_BY = NEW_AGG.UPDATED_BY
+   WHEN NOT MATCHED THEN
+     INSERT(
+        BILL_NUMBER, 	
+        SHIPPER,
+        TRIP,
+        TONNAGE, 
+        DAY_OF_MONTH,	
+        DAY_OF_WEEK, 
+        MONTH_OF_YEAR,
+        THE_YEAR, 
+        PICKUP_TERMINAL, 
+        PRIORITY, 
+        UPDATED_BY)
+     VALUES (
+        NEW_AGG.BILL_NUMBER, 
+        NEW_AGG.SHIPPER, 
+        NEW_AGG.TRIP,	
+        NEW_AGG.TONNAGE,	 
+        NEW_AGG.DAY_OF_MONTH, 
+        NEW_AGG.DAY_OF_WEEK,	 
+        NEW_AGG.MONTH_OF_YEAR,	
+        NEW_AGG.THE_YEAR,	
+        NEW_AGG.PICKUP_TERMINAL,
+        NEW_AGG.PRIORITY,	
+        NEW_AGG.UPDATED_BY
+        );
+        
+    delete from DYLT_MISSED_PICKUP_AGG where MONTH_OF_YEAR = right('0'||cast(month(CURRENT DATE) as varchar(2)),2) and THE_YEAR = cast(YEAR(CURRENT DATE)  as varchar(4)) and DAY_OF_MONTH > right('0'||cast(DAY(CURRENT DATE) as varchar(2)),2);
+        
+END P1
+ @
+GRANT EXECUTE ON PROCEDURE DYLT_MERGE_MISSED_PICKUP_AGG TO PUBLIC @
+"
